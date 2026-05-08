@@ -1,234 +1,308 @@
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
+import re
 import time
 
-# The JS that walks text nodes
-JS = """
+# --- DraftKings JS ---
+# Uses exact CSS classes from real_dk.html
+# .cb-market__label--truncate-strings  → player name
+# .cb-selection-picker__selection-label → threshold (e.g. "20+")
+# .cb-selection-picker__selection-odds  → odds (e.g. "−105")
+JS_DK = r"""
 var results = [];
-var oddsRe = /^[+\\-]\\d{3,4}$/;
-var toScoreRe = /To Score\\s+(\\d+)\\+/i;
-var nameRe = /^[A-Z][a-z]+(?:[ \\-][A-Z][a-z]+){1,3}$/;
-var walker = document.createTreeWalker(
-    document.body, NodeFilter.SHOW_TEXT, null, false
-);
-var node;
-while ((node = walker.nextNode())) {
-    var t = node.textContent.trim();
-    if (!oddsRe.test(t)) continue;
-    var el = node.parentElement;
-    for (var depth = 0; depth < 12 && el; depth++, el = el.parentElement) {
-        var inner = (el.innerText || '').trim();
-        if (!toScoreRe.test(inner)) continue;
-        if (inner.length > 1000) break;
-        var threshMatch = inner.match(toScoreRe);
-        var threshold = parseInt(threshMatch[1]);
-        var w2 = document.createTreeWalker(
-            el, NodeFilter.SHOW_TEXT, null, false
-        );
-        var n2;
-        while ((n2 = w2.nextNode())) {
-            var nt = n2.textContent.trim();
-            if (nameRe.test(nt)) {
-                results.push({
-                    odds: t,
-                    player: nt,
-                    threshold: threshold,
-                    context: inner.substring(0, 200)
-                });
-                break;
-            }
-        }
-        break;
+var rows = document.querySelectorAll('[data-testid="market-label"]');
+for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var nameEl = row.querySelector('.cb-market__label--truncate-strings');
+    if (!nameEl) continue;
+    var player = nameEl.textContent.trim();
+    if (!player || player.length < 3) continue;
+
+    var buttons = row.querySelectorAll('.cb-selection-picker__selection');
+    for (var j = 0; j < buttons.length; j++) {
+        var btn = buttons[j];
+        var labelEl = btn.querySelector('.cb-selection-picker__selection-label');
+        var oddsEl  = btn.querySelector('.cb-selection-picker__selection-odds');
+        if (!labelEl || !oddsEl) continue;
+
+        var threshText = labelEl.textContent.trim();
+        var oddsText   = oddsEl.textContent.trim();
+
+        var threshMatch = threshText.match(/^(\d+)\+$/);
+        if (!threshMatch) continue;
+
+        results.push({
+            player:    player,
+            threshold: parseInt(threshMatch[1]),
+            odds:      oddsText,
+        });
     }
 }
 return results;
 """
 
-# ALSO run a separate JS that just finds ALL odds on the page
-# so we can see what odds numbers exist at all
-JS_ALL_ODDS = """
+# --- FanDuel JS ---
+# After expanding sections, each bet row has:
+#   aria-label="To Score 5+ Points, Josh Hart, -2200"
+JS_FD = r"""
 var results = [];
-var oddsRe = /^[+\\-]\\d{3,4}$/;
-var walker = document.createTreeWalker(
-    document.body, NodeFilter.SHOW_TEXT, null, false
-);
-var node;
-while ((node = walker.nextNode())) {
-    var t = node.textContent.trim();
-    if (!oddsRe.test(t)) {
-        continue;
-    }
-    var parent = node.parentElement;
-    var parentText = (parent ? parent.innerText : '').trim().substring(0, 100);
-    results.push({odds: t, parentText: parentText});
+var re = /^To Score (\d+)\+ Points, (.+), ([+\-−]\d+)$/;
+var buttons = document.querySelectorAll('[role="button"][aria-label]');
+for (var i = 0; i < buttons.length; i++) {
+    var label = buttons[i].getAttribute('aria-label') || '';
+    var m = label.match(re);
+    if (!m) continue;
+    var player = m[2].trim();
+    if (!player) continue;
+    results.push({
+        threshold: parseInt(m[1]),
+        player:    player,
+        odds:      m[3].trim(),
+    });
 }
 return results;
 """
 
-# ALSO run a JS that finds all player names on the page
-JS_ALL_NAMES = """
-var results = [];
-var nameRe = /^[A-Z][a-z]+(?:[ \\-][A-Z][a-z]+){1,3}$/;
-var walker = document.createTreeWalker(
-    document.body, NodeFilter.SHOW_TEXT, null, false
-);
-var node;
-while ((node = walker.nextNode())) {
-    var t = node.textContent.trim();
-    if (nameRe.test(t)) {
-        var parent = node.parentElement;
-        var parentText = (parent ? parent.innerText : '').trim().substring(0, 100);
-        results.push({name: t, parentText: parentText});
-    }
-}
-return results;
-"""
 
-def debug_page(url, book_name):
+def debug_dk(url):
     print(f"\n{'='*60}")
-    print(f"DEBUGGING: {book_name}")
+    print(f"DEBUGGING: DRAFTKINGS")
     print(f"URL: {url}")
     print(f"{'='*60}\n")
 
     driver = uc.Chrome(version_main=147)
-
     try:
         driver.get(url)
-        print("Waiting 8 seconds for page to load...")
-        time.sleep(8)
+        print("Waiting 6s for page load...")
+        time.sleep(6)
 
-        # Click POINTS tab for DraftKings
-        if "draftkings" in url:
-            try:
-                tab = driver.find_element(
-                    By.XPATH,
-                    '//*[normalize-space(.)="POINTS"]'
-                )
-                driver.execute_script("arguments[0].click();", tab)
-                print("[DraftKings] Clicked POINTS tab")
-                time.sleep(3)
-            except Exception as e:
-                print(f"[DraftKings] POINTS tab failed: {e}")
-
-        # Click Player Points tab for FanDuel
-        if "fanduel" in url:
-            try:
-                tab = driver.find_element(
-                    By.XPATH,
-                    '//*[normalize-space(text())="Player Points"]'
-                )
-                driver.execute_script("arguments[0].click();", tab)
-                print("Clicked Player Points tab")
-                time.sleep(3)
-            except Exception as e:
-                print(f"Could not click Player Points tab: {e}")
-
-        # FIX 2 — DraftKings: expand collapsed sections after POINTS tab
-        if "draftkings" in url:
-            collapsed = driver.find_elements(
-                By.XPATH, '//*[@aria-expanded="false"]'
+        # Click POINTS tab
+        tab_clicked = False
+        try:
+            el = driver.find_element(
+                By.CSS_SELECTOR,
+                'a[data-testid="tab-switcher-tab-inner"][href*="subcategory=points"]'
             )
-            print(f"[DraftKings] Expanding {len(collapsed)} sections")
-            for el in collapsed:
+            driver.execute_script("arguments[0].click();", el)
+            print(f"[DK] Clicked POINTS tab via CSS selector (text='{el.text}')")
+            tab_clicked = True
+            time.sleep(2)
+        except Exception:
+            pass
+
+        if not tab_clicked:
+            for xpath in [
+                '//*[translate(normalize-space(.),"abcdefghijklmnopqrstuvwxyz","ABCDEFGHIJKLMNOPQRSTUVWXYZ")="POINTS" and not(*)]',
+                '//a[contains(@href,"subcategory=points")]',
+            ]:
                 try:
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView({block:'center'});", el
-                    )
+                    el = driver.find_element(By.XPATH, xpath)
                     driver.execute_script("arguments[0].click();", el)
-                    time.sleep(0.3)
-                except Exception:
-                    pass
-            time.sleep(2)
-
-        # FIX 3 — FanDuel: expand ALL collapsed sections before scanning
-        if "fanduel" in url:
-            time.sleep(2)
-            for attempt in range(3):
-                collapsed = driver.find_elements(
-                    By.XPATH, '//*[@aria-expanded="false"]'
-                )
-                if not collapsed:
+                    print(f"[DK] Clicked POINTS tab via XPath fallback")
+                    time.sleep(2)
+                    tab_clicked = True
                     break
-                print(f"[FanDuel] Expanding {len(collapsed)} sections (attempt {attempt+1})")
-                for el in collapsed:
-                    try:
-                        driver.execute_script(
-                            "arguments[0].scrollIntoView({block:'center'});", el
-                        )
-                        driver.execute_script("arguments[0].click();", el)
-                        time.sleep(0.2)
-                    except Exception:
-                        pass
-                time.sleep(2)
+                except Exception:
+                    continue
 
-        # Scroll down to load content
-        print("Scrolling down...")
-        for i in range(5):
-            driver.execute_script(
-                f"window.scrollTo(0, {(i+1) * 800});"
-            )
-            time.sleep(0.5)
-        time.sleep(2)
+        if not tab_clicked:
+            print("[DK] WARNING: POINTS tab not found")
+
+        # First scroll pass — forces lazy-loaded content to render
+        print("[DK] First scroll pass to load POINTS content...")
+        pos = 0
+        while True:
+            total = driver.execute_script("return document.body.scrollHeight")
+            if pos >= total:
+                break
+            driver.execute_script(f"window.scrollTo(0, {pos});")
+            time.sleep(0.35)
+            pos += 400
         driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(1)
 
-        # STEP 1: Show ALL odds found on page
-        print(f"\n--- ALL ODDS FOUND ON PAGE ---")
-        all_odds = driver.execute_script(JS_ALL_ODDS)
-        print(f"Total odds numbers found: {len(all_odds)}")
-        for i, item in enumerate(all_odds[:20]):
-            print(f"  Odds: {item['odds']:>6}  |  Parent text: {item['parentText'][:60]}")
-        if len(all_odds) > 20:
-            print(f"  ... and {len(all_odds) - 20} more")
+        # Expand all collapsed sections (only those with aria-expanded attribute,
+        # meaning they are genuine accordion/section toggles)
+        collapsed = driver.find_elements(By.XPATH, '//*[@aria-expanded="false"]')
+        print(f"[DK] Expanding {len(collapsed)} collapsed sections...")
+        for el in collapsed:
+            try:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center',behavior:'instant'});", el
+                )
+                driver.execute_script("arguments[0].click();", el)
+                time.sleep(0.2)
+            except Exception:
+                pass
+        time.sleep(2)
 
-        # STEP 2: Show ALL player names found on page
-        print(f"\n--- ALL PLAYER NAMES FOUND ON PAGE ---")
-        all_names = driver.execute_script(JS_ALL_NAMES)
-        print(f"Total names found: {len(all_names)}")
-        for i, item in enumerate(all_names[:20]):
-            print(f"  Name: {item['name']:25}  |  Parent: {item['parentText'][:50]}")
-        if len(all_names) > 20:
-            print(f"  ... and {len(all_names) - 20} more")
+        # Second scroll pass — forces newly expanded content to render
+        print("[DK] Second scroll pass after expansion...")
+        pos = 0
+        while True:
+            total = driver.execute_script("return document.body.scrollHeight")
+            if pos >= total:
+                break
+            driver.execute_script(f"window.scrollTo(0, {pos});")
+            time.sleep(0.35)
+            pos += 400
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
 
-        # STEP 3: Show what the main JS extraction finds
-        print(f"\n--- MAIN JS EXTRACTION RESULTS ---")
-        results = driver.execute_script(JS)
-        print(f"Total matched player+odds pairs: {len(results)}")
+        # Diagnostics: count key elements before running main JS
+        n_market = driver.execute_script(
+            "return document.querySelectorAll('[data-testid=\"market-label\"]').length;"
+        )
+        n_name = driver.execute_script(
+            "return document.querySelectorAll('.cb-market__label--truncate-strings').length;"
+        )
+        n_picker = driver.execute_script(
+            "return document.querySelectorAll('.cb-selection-picker__selection').length;"
+        )
+        n_odds = driver.execute_script(
+            "return document.querySelectorAll('.cb-selection-picker__selection-odds').length;"
+        )
+        print(f"[DK] DOM counts: market-label={n_market}  player-name={n_name}  picker-btn={n_picker}  odds={n_odds}")
 
-        if results:
-            print("\nMATCHED RESULTS:")
-            for i, r in enumerate(results[:20]):
-                print(f"\n  Result {i+1}:")
-                print(f"    Player:    {r['player']}")
-                print(f"    Threshold: {r['threshold']}+")
-                print(f"    Odds:      {r['odds']}")
-                print(f"    Context:   {r['context'][:100]}")
+        # If no market-label rows, try scrolling/waiting more and re-checking
+        if n_market == 0:
+            print("[DK] No market-label rows found. Waiting 5s more and retrying scroll...")
+            time.sleep(5)
+            pos = 0
+            while True:
+                total = driver.execute_script("return document.body.scrollHeight")
+                if pos >= total:
+                    break
+                driver.execute_script(f"window.scrollTo(0, {pos});")
+                time.sleep(0.4)
+                pos += 400
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(2)
+            n_market = driver.execute_script(
+                "return document.querySelectorAll('[data-testid=\"market-label\"]').length;"
+            )
+            n_name = driver.execute_script(
+                "return document.querySelectorAll('.cb-market__label--truncate-strings').length;"
+            )
+            print(f"[DK] After retry: market-label={n_market}  player-name={n_name}")
+
+        # Show all data-testid values present on page (first 30 unique)
+        testids = driver.execute_script("""
+            var ids = {};
+            document.querySelectorAll('[data-testid]').forEach(function(el) {
+                ids[el.getAttribute('data-testid')] = true;
+            });
+            return Object.keys(ids).slice(0, 40);
+        """)
+        print(f"[DK] All data-testid values on page ({len(testids)}):")
+        for tid in testids:
+            print(f"  {tid}")
+
+        # Run extraction
+        raw = driver.execute_script(JS_DK)
+        print(f"\n[DK] JS found {len(raw or [])} raw results")
+
+        if raw:
+            print(f"\n{'Player':<30} {'Threshold':>10} {'Odds':>8}")
+            print(f"{'-'*30} {'-'*10} {'-'*8}")
+            for r in sorted(raw, key=lambda x: (x['player'], x['threshold'])):
+                odds = r['odds'].replace('−', '-')
+                print(f"{r['player']:<30} {str(r['threshold'])+'+':>10} {odds:>8}")
         else:
-            print("NO MATCHES FOUND")
-            print("\nThis means either:")
-            print("  1. Player names and odds are not in same DOM container")
-            print("  2. Page did not load properly")
-            print("  3. Need to expand sections first")
-
-            # Show raw page text so we can see what loaded
-            print("\n--- PAGE TEXT SAMPLE (first 2000 chars) ---")
+            print("[DK] NO RESULTS")
             body = driver.find_element(By.TAG_NAME, "body").text
-            print(body[:2000])
-
-        input("\nPress Enter to close browser...")
+            print("Page sample:", body[:1000])
 
     except Exception as e:
         print(f"ERROR: {e}")
+        import traceback; traceback.print_exc()
     finally:
         driver.quit()
 
-# Run debug on both books
-debug_page(
-    "https://sportsbook.draftkings.com/event/phi-76ers-%2540-ny-knicks/34103684",
-    "DRAFTKINGS"
-)
 
-debug_page(
-    "https://on.sportsbook.fanduel.ca/basketball/nba/philadelphia-76ers-@-new-york-knicks-35564245",
-    "FANDUEL"
-)
+def debug_fd(url):
+    print(f"\n{'='*60}")
+    print(f"DEBUGGING: FANDUEL")
+    print(f"URL: {url}")
+    print(f"{'='*60}\n")
+
+    driver = uc.Chrome(version_main=147)
+    try:
+        # Navigate directly to Player Points tab
+        tab_url = url.rstrip('/') + "?tab=player-points"
+        time.sleep(2)
+        driver.get(tab_url)
+        print("Waiting 8s for page load...")
+        time.sleep(8)
+
+        # Bot challenge check — wait up to 30s for manual solve
+        for attempt in range(3):
+            try:
+                body = driver.find_element(By.TAG_NAME, "body").text
+                if "Press & Hold" in body or "confirm you are" in body.lower():
+                    print(f"[FD] Bot challenge detected (attempt {attempt+1}) — waiting 30s for manual solve...")
+                    time.sleep(30)
+                else:
+                    break
+            except Exception:
+                break
+
+        # Expand all collapsed 'To Score X+ Points' sections
+        sections = driver.find_elements(By.CSS_SELECTOR, '[role="button"][aria-expanded="false"]')
+        to_score = [
+            el for el in sections
+            if re.match(r'^To Score \d+\+ Points$',
+                        (el.get_attribute('aria-label') or '').strip())
+        ]
+        print(f"[FD] Found {len(to_score)} collapsed 'To Score X+' sections")
+        for el in to_score:
+            try:
+                label = el.get_attribute('aria-label')
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center',behavior:'instant'});", el
+                )
+                time.sleep(0.3)
+                driver.execute_script("arguments[0].click();", el)
+                time.sleep(1.0)
+                print(f"[FD]   Expanded: {label}")
+            except Exception:
+                pass
+        time.sleep(2)
+
+        # Scroll through page to force lazy-loaded bet rows to render
+        print("[FD] Scrolling to trigger lazy-loaded content...")
+        pos = 0
+        while True:
+            total = driver.execute_script("return document.body.scrollHeight")
+            if pos >= total:
+                break
+            driver.execute_script(f"window.scrollTo(0, {pos});")
+            time.sleep(0.4)
+            pos += 400
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(2)
+
+        # Run extraction
+        raw = driver.execute_script(JS_FD)
+        print(f"\n[FD] JS found {len(raw or [])} raw results")
+
+        if raw:
+            print(f"\n{'Player':<30} {'Threshold':>10} {'Odds':>8}")
+            print(f"{'-'*30} {'-'*10} {'-'*8}")
+            for r in sorted(raw, key=lambda x: (x['threshold'], x['player'])):
+                odds = r['odds'].replace('−', '-')
+                print(f"{r['player']:<30} {str(r['threshold'])+'+':>10} {odds:>8}")
+        else:
+            print("[FD] NO RESULTS")
+            body = driver.find_element(By.TAG_NAME, "body").text
+            print("Page sample:", body[:1000])
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback; traceback.print_exc()
+    finally:
+        driver.quit()
+
+
+debug_dk("https://sportsbook.draftkings.com/event/phi-76ers-%2540-ny-knicks/34103684")
+debug_fd("https://on.sportsbook.fanduel.ca/basketball/nba/philadelphia-76ers-@-new-york-knicks-35564245")
