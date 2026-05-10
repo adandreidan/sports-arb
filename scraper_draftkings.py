@@ -1,47 +1,22 @@
 import re
-import time
 from datetime import datetime
 
-import undetected_chromedriver as uc
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-import config
 
-GAME_LABEL = "PHI 76ers @ NY Knicks"
+import config
 
 
 class DraftKingsScraper:
 
     def __init__(self):
-        options = uc.ChromeOptions()
-        options.add_argument("--window-size=1400,900")
-        self.driver = uc.Chrome(options=options, headless=False, version_main=147)
-        self.driver.set_page_load_timeout(config.PAGE_LOAD_TIMEOUT)
+        options = Options()
+        options.debugger_address = f"localhost:{config.REMOTE_DEBUG_PORT}"
+        self.driver = webdriver.Chrome(options=options)
+        print("[DraftKings] Connected to existing Chrome")
 
     def get_player_props(self) -> list:
-        print(f"[DraftKings] Loading: {config.DK_GAME_URL}")
-        self.driver.get(config.DK_GAME_URL)
-        print("[DraftKings] Waiting 8s...")
-        time.sleep(8)
-
-        # Click POINTS tab
-        try:
-            tab = self.driver.find_element(
-                By.XPATH,
-                '//*[normalize-space(.)="POINTS" and not(*)]'
-            )
-            self.driver.execute_script("arguments[0].click();", tab)
-            print("[DraftKings] Clicked POINTS tab")
-        except Exception:
-            print("[DraftKings] POINTS tab not found")
-        time.sleep(3)
-
-        for el in self.driver.find_elements(By.XPATH,
-                '//*[@aria-expanded="false"][@aria-label]'):
-            if "To Score" in (el.get_attribute("aria-label") or ""):
-                self.driver.execute_script("arguments[0].click();", el)
-                time.sleep(0.5)
-        time.sleep(3)
-
         elements = self.driver.find_elements(By.XPATH, '//*[@aria-label]')
         props = []
         seen = set()
@@ -66,20 +41,16 @@ class DraftKingsScraper:
                 continue
             seen.add(key)
             props.append({
-                "player":     player,
-                "line":       str(float(threshold) - 0.5),
-                "over_odds":  odds,
+                "player": player,
+                "line": str(float(threshold) - 0.5),
+                "over_odds": odds,
                 "under_odds": "N/A",
-                "book":       "draftkings",
-                "game":       GAME_LABEL,
-                "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "book": "draftkings",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
 
         print(f"[DraftKings] Found {len(props)} props")
         return props
 
     def close(self):
-        try:
-            self.driver.quit()
-        except Exception:
-            pass
+        pass
